@@ -1,6 +1,6 @@
 import { isValidStatusColor } from "@/lib/status";
 import { createServiceSupabase } from "@/lib/supabase/client";
-import type { MachineState, StatusDefinition, StatusScope } from "@/lib/types";
+import type { MachineState, StatusDefinition, StatusScope, StatusReportType } from "@/lib/types";
 
 type StatusDefinitionInput = {
   scope: StatusScope;
@@ -9,7 +9,7 @@ type StatusDefinitionInput = {
   label_ru?: string | null;
   color_hex?: string;
   machine_state?: MachineState;
-  requires_malfunction_report?: boolean;
+  report_type?: StatusReportType;
 };
 
 // Protected status definitions - these cannot be edited or deleted
@@ -19,7 +19,7 @@ type ProtectedStatusConfig = {
   label_ru: string;
   color_hex: string;
   machine_state: MachineState;
-  requires_malfunction_report: boolean;
+  report_type: StatusReportType;
 };
 
 const PROTECTED_STATUSES: Record<string, ProtectedStatusConfig> = {
@@ -28,21 +28,28 @@ const PROTECTED_STATUSES: Record<string, ProtectedStatusConfig> = {
     label_ru: "Другое",
     color_hex: "#94a3b8",
     machine_state: "stoppage",
-    requires_malfunction_report: false,
+    report_type: "none",
   },
   production: {
     label_he: "ייצור",
     label_ru: "Производство",
     color_hex: "#10b981",
     machine_state: "production",
-    requires_malfunction_report: false,
+    report_type: "none",
   },
   malfunction: {
     label_he: "תקלה",
     label_ru: "Неисправность",
     color_hex: "#ef4444",
     machine_state: "stoppage",
-    requires_malfunction_report: true,
+    report_type: "malfunction",
+  },
+  stop: {
+    label_he: "עצירה",
+    label_ru: "Остановка",
+    color_hex: "#f97316",
+    machine_state: "stoppage",
+    report_type: "general", // Requires report when selected manually, but not when set as initial status
   },
 };
 
@@ -71,7 +78,7 @@ const VALID_MACHINE_STATES: MachineState[] = ["production", "setup", "stoppage"]
 type NormalizedPayload = StatusDefinitionInput & {
   label_ru: string | null;
   color_hex: string;
-  requires_malfunction_report: boolean;
+  report_type: StatusReportType;
 };
 
 const normalizePayload = (
@@ -108,7 +115,7 @@ const normalizePayload = (
     label_ru: payload.label_ru?.trim() ?? null,
     color_hex: color,
     machine_state: machineState,
-    requires_malfunction_report: payload.requires_malfunction_report ?? false,
+    report_type: payload.report_type ?? "none",
   };
 };
 
@@ -142,7 +149,7 @@ async function ensureGlobalOtherStatus(): Promise<StatusDefinition> {
       label_ru: otherConfig.label_ru,
       color_hex: otherConfig.color_hex,
       machine_state: otherConfig.machine_state,
-      requires_malfunction_report: otherConfig.requires_malfunction_report,
+      report_type: otherConfig.report_type,
       is_protected: true,
     })
     .select("*")
@@ -312,3 +319,40 @@ export async function deleteStatusDefinition(id: string): Promise<void> {
 
 // Export for UI to check if a status is protected (non-editable/non-deletable)
 export { isProtectedStatus, PROTECTED_LABELS_HE };
+
+// Stop status label for client-side checks (used as initial session status)
+export const STOP_STATUS_LABEL_HE = PROTECTED_STATUSES.stop.label_he;
+
+// Protected status keys for type-safe lookups
+export type ProtectedStatusKey = keyof typeof PROTECTED_STATUSES;
+
+/**
+ * Get a protected status definition by its key.
+ * Uses is_protected column for robust identification.
+ */
+export async function getProtectedStatusDefinition(
+  key: ProtectedStatusKey,
+): Promise<StatusDefinition> {
+  const supabase = createServiceSupabase();
+  const config = PROTECTED_STATUSES[key];
+
+  const { data, error } = await supabase
+    .from("status_definitions")
+    .select("*")
+    .eq("scope", "global")
+    .eq("is_protected", true)
+    .eq("label_he", config.label_he)
+    .is("station_id", null)
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(`Failed to fetch protected status '${key}': ${error.message}`);
+  }
+
+  if (!data) {
+    throw new Error(`Protected status '${key}' not found in database`);
+  }
+
+  return data as StatusDefinition;
+}

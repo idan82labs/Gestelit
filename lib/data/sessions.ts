@@ -1,6 +1,7 @@
 import { createServiceSupabase } from "@/lib/supabase/client";
 import {
   fetchActiveStatusDefinitions,
+  getProtectedStatusDefinition,
 } from "@/lib/data/status-definitions";
 import type {
   Job,
@@ -38,18 +39,9 @@ type SessionPayload = {
   started_at?: string;
 };
 
-async function getStoppedStatusId(): Promise<string> {
-  const definitions = await fetchActiveStatusDefinitions();
-  // Find a stoppage status by machine_state (language-agnostic approach)
-  const stopped = definitions.find(
-    (item) => item.machine_state === "stoppage",
-  ) ?? definitions[0];
-
-  if (!stopped) {
-    throw new Error("STOPPED_STATUS_NOT_FOUND");
-  }
-
-  return stopped.id;
+async function getStopStatusId(): Promise<string> {
+  const stopStatus = await getProtectedStatusDefinition("stop");
+  return stopStatus.id;
 }
 
 /**
@@ -81,18 +73,18 @@ export async function closeActiveSessionsForWorker(
   }
 
   const closedIds: string[] = [];
-  const stoppedId = await getStoppedStatusId();
+  const stopStatusId = await getStopStatusId();
 
   for (const session of activeSessions) {
     // Use atomic database function to create final status event
     // This closes open events and mirrors to sessions in a single transaction
     const { error: statusError } = await supabase.rpc("create_status_event_atomic", {
       p_session_id: session.id,
-      p_status_definition_id: stoppedId,
+      p_status_definition_id: stopStatusId,
       p_station_reason_id: null,
       p_note: "replaced-by-new-session",
       p_image_url: null,
-      p_malfunction_id: null,
+      p_report_id: null,
     });
 
     if (statusError) {
@@ -117,25 +109,19 @@ export async function closeActiveSessionsForWorker(
   return closedIds;
 }
 
-async function getInitialStatusId(stationId: string): Promise<string> {
-  const definitions = await fetchActiveStatusDefinitions(stationId);
-  const sorted = definitions.sort(
-    (a, b) =>
-      new Date(a.created_at ?? 0).getTime() -
-      new Date(b.created_at ?? 0).getTime(),
-  );
-  const globalFirst = sorted.find((item) => item.scope === "global") ?? sorted[0];
-  if (!globalFirst) {
-    throw new Error("INITIAL_STATUS_NOT_FOUND");
-  }
-  return globalFirst.id;
+/**
+ * Get the initial status ID for a new session.
+ * Uses the protected "stop" status as the default starting status.
+ */
+async function getInitialStatusId(): Promise<string> {
+  return getStopStatusId();
 }
 
 export async function createSession(
   payload: SessionPayload,
 ): Promise<Session> {
   const supabase = createServiceSupabase();
-  const initialStatusId = await getInitialStatusId(payload.station_id);
+  const initialStatusId = await getInitialStatusId();
 
   const { data, error } = await supabase
     .from("sessions")
@@ -266,7 +252,7 @@ type StatusEventPayload = {
   note?: string | null;
   image_url?: string | null;
   started_at?: string;
-  malfunction_id?: string | null;
+  report_id?: string | null;
 };
 
 const assertStatusAllowedForSession = async (
@@ -314,7 +300,7 @@ export async function startStatusEvent(
     p_station_reason_id: payload.station_reason_id ?? null,
     p_note: payload.note ?? null,
     p_image_url: payload.image_url ?? null,
-    p_malfunction_id: payload.malfunction_id ?? null,
+    p_report_id: payload.report_id ?? null,
   });
 
   if (error) {
@@ -460,17 +446,17 @@ export async function abandonActiveSession(
   const note =
     reason === "worker_choice" ? "worker-abandon" : "grace-window-expired";
 
-  const stoppedId = await getStoppedStatusId();
+  const stopStatusId = await getStopStatusId();
 
   // Use atomic database function to create the final status event
   // This closes open events and mirrors to sessions in a single transaction
   const { error: statusError } = await supabase.rpc("create_status_event_atomic", {
     p_session_id: sessionId,
-    p_status_definition_id: stoppedId,
+    p_status_definition_id: stopStatusId,
     p_station_reason_id: null,
     p_note: note,
     p_image_url: null,
-    p_malfunction_id: null,
+    p_report_id: null,
   });
 
   if (statusError) {
